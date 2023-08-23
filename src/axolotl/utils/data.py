@@ -215,6 +215,8 @@ def load_tokenized_prepared_datasets(
                 d_prompt_style = d_type_split[1] if len(d_type_split) > 1 else None
             if "train" in ds:
                 ds = ds["train"]
+            if cfg.prepare_ds_only:
+                ds.cleanup_cache_files()
             if (
                 "input_ids" in ds.features
                 and "attention_mask" in ds.features
