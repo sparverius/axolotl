@@ -90,8 +90,7 @@ accelerate launch scripts/finetune.py examples/openllama-3b/lora.yml \
   ```bash
   docker run --gpus '"all"' --rm -it winglian/axolotl:main-py3.10-cu118-2.0.1
   ```
-  - `winglian/axolotl-runpod:main-py3.10-cu118-2.0.1`: for runpod
-  - `winglian/axolotl-runpod:main-py3.9-cu118-2.0.1-gptq`: for gptq
+  - `winglian/axolotl-runpod:main-latest`: for runpod or use this [direct link](https://runpod.io/gsc?template=v2ickqhz9s&ref=6i7fkpdz)
 
   Or run on the current files for development:
 
@@ -104,19 +103,9 @@ accelerate launch scripts/finetune.py examples/openllama-3b/lora.yml \
 
   2. Install pytorch stable https://pytorch.org/get-started/locally/
 
-  3. Install python dependencies with ONE of the following:
-      - Recommended, supports QLoRA, NO gptq/int4 support
+  3. Install axolotl along with python dependencies
         ```bash
-        pip3 install -e .
-        pip3 install -U git+https://github.com/huggingface/peft.git
-        ```
-      - gptq/int4 support, NO QLoRA
-        ```bash
-        pip3 install -e .[gptq]
-        ```
-      - same as above but not recommended
-        ```bash
-        pip3 install -e .[gptq_triton]
+        pip3 install -e .[flash-attn]
         ```
 
 - LambdaLabs
@@ -151,10 +140,9 @@ accelerate launch scripts/finetune.py examples/openllama-3b/lora.yml \
   git clone https://github.com/OpenAccess-AI-Collective/axolotl
   cd axolotl
 
-  pip3 install -e . # change depend on needs
+  pip3 install -e .
   pip3 install protobuf==3.20.3
   pip3 install -U --ignore-installed requests Pillow psutil scipy
-  pip3 install git+https://github.com/huggingface/peft.git # not for gptq
   ```
 
   5. Set path
@@ -162,6 +150,8 @@ accelerate launch scripts/finetune.py examples/openllama-3b/lora.yml \
   export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
   ```
   </details>
+
+- Windows: Please use WSL or Docker!
 
 ### Dataset
 
@@ -328,6 +318,15 @@ See [examples](examples) for quick start. It is recommended to duplicate and mod
       name: enron_emails
       type: completion # format from earlier
 
+  # huggingface repo with multiple named configurations/subsets
+  datasets:
+    - path: bigcode/commitpackft
+      name:
+        - ruby
+        - python
+        - typescript
+      type: ... # unimplemented custom format
+
   # local
   datasets:
     - path: data.jsonl # or json
@@ -407,6 +406,10 @@ fp16: true
 # Use CUDA tf32
 tf32: true # require >=ampere
 
+# No AMP (automatic mixed precision)
+bfloat16: true # require >=ampere
+float16: true
+
 # a list of one or more datasets to finetune the model with
 datasets:
   # hf dataset repo | "json" for local dataset, make sure to fill data_files
@@ -459,6 +462,9 @@ dataset_shard_idx:
 # the maximum length of an input to train with, this should typically be less than 2048
 # as most models have a token/context limit of 2048
 sequence_len: 2048
+# pad inputs so each step uses constant sized buffers
+# this will reduce memory fragmentation and may prevent OOMs, by re-using memory more efficiently
+pad_to_sequence_len:
 # max sequence length to concatenate training samples together up to
 # inspired by StackLLaMA. see https://huggingface.co/blog/stackllama#supervised-fine-tuning
 # FutureWarning: This will soon be DEPRECATED
@@ -493,6 +499,12 @@ lora_modules_to_save:
 lora_out_dir:
 lora_fan_in_fan_out: false
 
+# ReLoRA configuration
+# must use either 'lora' or 'qlora' adapter, and does not support fsdp or deepspeed
+relora_steps: # number of steps per ReLoRA restart
+relora_warmup_steps: # number of per-restart warmup steps
+relora_cpu_offload: # true to perform lora weight merges on cpu during restarts, for modest gpu memory savings
+
 # wandb configuration if you're using it
 wandb_mode: # "offline" to save run metadata locally and not sync to the server, "disabled" to turn off wandb
 wandb_project: # your wandb project name
@@ -515,7 +527,7 @@ lr_quadratic_warmup:
 logging_steps:
 save_strategy: # set to `no` to skip checkpoint saves
 save_steps: # leave empty to save at each epoch
-eval_steps:
+eval_steps: # leave empty to eval at each epoch
 save_total_limit: # checkpoints saved at a time
 max_steps:
 
@@ -548,6 +560,30 @@ log_sweep_min_lr:
 log_sweep_max_lr:
 
 # specify optimizer
+# Valid values are driven by the Transformers OptimizerNames class, see:
+# https://github.com/huggingface/transformers/blob/95b374952dc27d8511541d6f5a4e22c9ec11fb24/src/transformers/training_args.py#L134
+#
+# Note that not all optimizers may be available in your environment, ex: 'adamw_anyprecision' is part of
+# torchdistx, 'adamw_bnb_8bit' is part of bnb.optim.Adam8bit, etc. When in doubt, it is recommended to start with the optimizer used
+# in the examples/ for your model and fine-tuning use case.
+#
+# Valid values for 'optimizer' include:
+# - adamw_hf
+# - adamw_torch
+# - adamw_torch_fused
+# - adamw_torch_xla
+# - adamw_apex_fused
+# - adafactor
+# - adamw_anyprecision
+# - sgd
+# - adagrad
+# - adamw_bnb_8bit
+# - lion_8bit
+# - lion_32bit
+# - paged_adamw_32bit
+# - paged_adamw_8bit
+# - paged_lion_32bit
+# - paged_lion_8bit
 optimizer:
 # specify weight decay
 weight_decay:
@@ -601,11 +637,13 @@ fsdp_config:
 # Deepspeed config path
 deepspeed:
 
+# Advanced DDP Arguments
+ddp_timeout:
+ddp_bucket_cap_mb:
+ddp_broadcast_buffers:
+
 # Path to torch distx for optim 'adamw_anyprecision'
 torchdistx_path:
-
-# Set padding for data collator to 'longest'
-collator_pad_to_longest:
 
 # Set to HF dataset for type: 'completion' for streaming instead of pre-tokenize
 pretraining_dataset:
@@ -626,7 +664,7 @@ strict:
 
 Run
 ```bash
-accelerate launch scripts/finetune.py configs/your_config.yml
+accelerate launch scripts/finetune.py your_config.yml
 ```
 
 #### Multi-GPU
@@ -725,6 +763,10 @@ Try to turn off xformers.
 > accelerate config missing
 
 It's safe to ignore it.
+
+> NCCL Timeouts during training
+
+See the [NCCL](docs/nccl.md) guide.
 
 ## Need help? 🙋♂️
 

@@ -1,6 +1,8 @@
 """
 utility helpers for distributed checks
 """
+import os
+import pickle  # nosec
 from contextlib import contextmanager
 
 import torch
@@ -44,6 +46,10 @@ def is_main_process():
     return dist.get_rank() == 0
 
 
+def get_world_size():
+    return int(os.getenv("WORLD_SIZE", "1"))
+
+
 @contextmanager
 def zero_first(is_main):
     """
@@ -84,7 +90,7 @@ def compute_and_broadcast(fn):  # pylint: disable=invalid-name
     return float(value_tensor.item())
 
 
-def gather_from_all_ranks(fn, world_size=1):  # pylint: disable=invalid-name
+def gather_scalar_from_all_ranks(fn, world_size=1):  # pylint: disable=invalid-name
     """
     Run a callable 'fn' on all ranks and gather the results on the specified rank.
 
@@ -97,17 +103,16 @@ def gather_from_all_ranks(fn, world_size=1):  # pylint: disable=invalid-name
     - A list of computed values from all ranks if on the gathering rank, otherwise None.
     """
     value_scalar = fn()
+    if not is_distributed():
+        return [value_scalar]
     value_tensor = torch.tensor(value_scalar, device=dist.get_rank()).float()
 
-    # Placeholder tensor for gathering results
-    if is_main_process():
-        gathered_tensors = [torch.zeros_like(value_tensor) for _ in range(world_size)]
+    if not is_main_process():
+        dist.gather(value_tensor, dst=0)
     else:
-        gathered_tensors = None
+        gathered_tensors = [torch.zeros_like(value_tensor) for _ in range(world_size)]
+        dist.gather(value_tensor, gather_list=gathered_tensors, dst=0)
 
-    dist.gather(value_tensor, gather_list=gathered_tensors, dst=0)
-
-    if is_main_process():
         # Convert tensors back to their original type (int or float)
         gathered_values = []
         for tensor in gathered_tensors:
@@ -137,8 +142,35 @@ def reduce_and_broadcast(fn1, fn2):
     if not is_distributed():
         return fn2([fn1()])
 
-    gathered_values = gather_from_all_ranks(fn1, world_size=dist.get_world_size())
+    gathered_values = gather_scalar_from_all_ranks(fn1, world_size=dist.get_world_size())
 
     # Use compute_and_broadcast to compute the reduced value on the main process
     # and then broadcast it to all ranks
     return compute_and_broadcast(lambda: fn2(gathered_values))
+
+  
+def broadcast_dict(vals: dict):
+    if not is_distributed():
+        return vals
+
+    if is_main_process():
+        data_byte = pickle.dumps(vals)
+        data_tensor = torch.ByteTensor(list(data_byte)).to("cuda")
+        data_size = torch.IntTensor([len(data_byte)]).to("cuda")
+    else:
+        data_tensor = torch.empty([1024], dtype=torch.uint8, device="cuda")
+        data_size = torch.IntTensor([0]).to("cuda")
+
+    dist.broadcast(data_size, 0)
+    if not is_main_process():
+        # resize
+        data_tensor = data_tensor.new_empty([data_size.item()])
+
+    dist.broadcast(data_tensor, 0)
+
+    if not is_main_process():
+        data_list = data_tensor.cpu().tolist()
+        data_byte = bytes(data_list[: data_size.item()])
+        vals = pickle.loads(data_byte)  # nosec
+
+    return vals
