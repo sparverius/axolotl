@@ -6,6 +6,7 @@ import functools
 import logging
 from typing import Dict, List, Tuple, Union
 
+from fastchat.conversation import Conversation
 from transformers import PreTrainedTokenizer
 
 from axolotl.prompters import IGNORE_TOKEN_ID
@@ -357,12 +358,15 @@ class ShareGPTPromptTokenizingStrategy(PromptTokenizingStrategy):
         result, current_len = tokenize_prompt_default()
         user_token = self._get_user_token()
         assistant_token = self._get_assistant_token()
+        conversation: Conversation = (
+            self.prompter._conversation  # pylint: disable=protected-access
+        )
         try:
             for _, part in enumerate(
                 self.prompter.build_prompt(self.get_conversation_thread(prompt))
             ):
                 if isinstance(part, tuple):
-                    if part[0] == "USER:":
+                    if part[0] == conversation.roles[0]:
                         part = part[0] + part[1] if not user_token else part[1]
                         # this is still the user query, we should
                         res = self._tokenize(
@@ -374,7 +378,7 @@ class ShareGPTPromptTokenizingStrategy(PromptTokenizingStrategy):
                             res["input_ids"] = [user_token, *res["input_ids"]]
                         # everything from this is masked out from the labels
                         labels = [IGNORE_TOKEN_ID] * len(res["input_ids"])
-                    elif part[0] == "ASSISTANT:":
+                    elif part[0] == conversation.roles[1]:
                         # TODO label assistant token/tokens w/ IGNORE_TOKEN_ID
                         part = part[0] + part[1] if not assistant_token else part[1]
                         # this should be the assistent response, should end with an eos token
